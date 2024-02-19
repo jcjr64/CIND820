@@ -1,0 +1,209 @@
+SEC Filings Dictionary-Based Sentiment Analysis
+Search for a set of 10-Ks for a specific company
+
+Run a lexicon-based sentiment analysis on this set of SEC filings using the Loughran-McDonald dictionary
+
+Introduction to the Loughran-McDonald Dictionary
+A dictionary-based (also known as lexicon-based) sentiment analysis uses lists of words called lexicons. In these lists, the words have been pre-scored for sentiment (e.g., positivity/negativity) as well as the strength of the sentiment.
+
+Language usage varies from one domain to another. When choosing a lexicon-based approach to sentiment analysis, it is important to consider how the lexicon was created and whether this particular lexicon is a good match for your project.
+
+In 2011,Tim Loughran and Bill McDonald's research concluded that a more general sentiment lexicon was not a good fit for analyzing the sentiment of financial statements; their research showed a domain-specific sentiment lexicon was more accurate. They analyzed over 40,000 10-Ks from 1994-2007. Within these financial documents, they scored individual words across different categories of sentiment. Currently, their dictionary uses seven categories of sentiment, defined as follows:
+
+image.png
+
+Running an SEC Dictionary-Based Sentiment Analysis
+This Notebook provides an example of how to run a lexicon-based analysis on a selection of 10-K filings. We will use the Loughran-McDonald Master Dictionary w/ Sentiment Word Lists as our lexicon. Begin by downloading this sentiment analysis dictionary.
+
+Download the CSV master file from https://sraf.nd.edu/loughranmcdonald-master-dictionary/.
+Save it to the same directory as this Notebook.
+Specify the SEC Documents You Are Searching For
+Begin by searching for a specific set of SEC filings. In this exercise, we are retrieving all of the Twitter 10-Ks.
+
+Change the "username" below to your WRDS username.
+Run the cell below to retrieve the Twitter 10-Ks.
+Note that if you are returning to this exercise and wish to change the company, you can do so by modifying the company's CIK in the code below.
+
+import psycopg2
+from psycopg2.extras import json as psycop_json
+
+username = "username"
+
+with psycopg2.connect(
+    host="wrds-pgdata.wharton.upenn.edu", database="wrds", user=username, port=9737
+) as conn:
+    conn.autocommit = True
+    with conn.cursor() as cursor:
+        sql_query = """
+            SELECT DISTINCT 
+                filing_view.accession,
+                filing_view.form,
+                filing_view.filing_date,
+                filing_view.report_date,
+                filing_view.acceptance,
+                filing_view.filing,
+                filing_view.registrants
+            FROM 
+                wrds_sec_search.filing_view
+            JOIN 
+                wrds_sec_search.registrant ON registrant.accession = filing_view.accession
+            WHERE
+                    form in ('10-K')
+                AND 
+                     wrds_sec_search.registrant.cik in ('0001418091')
+            """
+        cursor.execute(sql_query, [])
+        results = cursor.fetchall()
+        print("Total number of filings: " + str(len(results)))
+Run a Dictionary-Based Sentiment Analysis
+The next step is to load the file that this Notebook will use to create the master dictionary. In this case, we are loading the aforementioned Loughran-McDonald_MasterDictionary_1993-2021.csv We have also specified recommended output files. Note that if you return to this exercise and want to make certain customizations, the mark-up in the code below indicates where you can make changes to the code.
+
+Run the cell below to load the file and run the analysis.
+import csv
+import glob
+import re
+import string
+import sys
+import datetime as dt
+
+
+def utf8len(s):
+    """helper function to get the size of string"""
+    return len(s.encode("utf-8"))
+
+
+# Load your master dictionary file. This file requires a
+# Word column and a Syllables column. Other columns are optional
+# and should be defined in the SENTIMENT_OUTPUT_FIELDS Python dictionary below.
+master_dictionary_file = "Loughran-McDonald_MasterDictionary_1993-2021.csv"
+
+# The SENTIMENT_OUTPUT_FIELDS dictionary below contains the sentiment fields we want
+# to include. The names below must exactly match the column names in the master
+# dictionary file.
+SENTIMENT_OUTPUT_FIELDS = {
+    "Negative": 1,
+    "Positive": 1,
+    "Uncertainty": 1,
+    "Litigious": 1,
+    "Strong_Modal": 1,
+    "Weak_Modal": 1,
+    "Constraining": 1,
+}
+
+# Load the master dictionary CSV file into a Python dictionary
+# with Word as the key.
+master_dictionary = {}
+with open(master_dictionary_file) as csv_file:
+    csv_reader = csv.DictReader(csv_file, delimiter=",")
+    line_count = 0
+    for row in csv_reader:
+        master_dictionary[row["Word"]] = row
+        line_count += 1
+print(f"master dictionary has {len(master_dictionary)} words.")
+
+# The following output fields are available by default.
+FIXED_OUTPUT_FIELDS = [
+    "Accession_No",  # 0
+    "CIK",  # 1
+    "Filing_Date",  # 2
+    "Text_Size (Bytes)",  # 3
+    "Number_of_Words",  # 4
+    "Number_of_Alphabetic",  # 5
+    "Number_of_Digits",  # 6
+    "Number_of_Numbers",  # 7
+    "Average_Syllables",  # 8
+    "Average_Word_Length",  # 9
+    "Vocabulary",  # 10
+]
+original_len_output = len(FIXED_OUTPUT_FIELDS)
+
+# The sentiment columns are added dynamically.
+# (As of Python 3.6, for the CPython implementation of Python, dictionaries remember the order of items inserted.)
+for key, item in SENTIMENT_OUTPUT_FIELDS.items():
+    FIXED_OUTPUT_FIELDS.append(f"{key}")
+
+# Create all of the column names.
+data = []
+data.append(FIXED_OUTPUT_FIELDS)
+
+for result in results:
+    text = result[5]
+    cik = result[6][0]["cik"]
+    filing_date = result[2]
+    # Customize tokenization here.
+    tokens = re.findall("\w+", text)  # Note that \w+ splits hyphenated words.
+    vocabulary = {}
+    # Setup initial placeholders.
+    output_data = [0] * len(FIXED_OUTPUT_FIELDS)
+    output_data[0] = result[0]  # Accession_No
+    output_data[1] = cik  # CIK
+    output_data[2] = filing_date  # Filing_Date
+    total_tokens = 0
+    output_data[3] = utf8len(text)  # Text_Size
+
+    output_data[5] = len(re.findall("[A-Z]", text))  # Number_of_Alphabetic
+    output_data[6] = len(re.findall("[0-9]", text))  # Number_of_Digits
+    # Drop punctuation within numbers for number count.
+    number_doc = re.sub("(?!=[0-9])(\.|,)(?=[0-9])", "", text)
+    number_doc = number_doc.translate(
+        str.maketrans(string.punctuation, " " * len(string.punctuation))
+    )
+    output_data[7] = len(
+        re.findall(r"\b[-+\(]?[$€£]?[-+(]?\d+\)?\b", number_doc)
+    )  # Number_of_Numbers
+
+    total_syllables = 0
+    word_length = 0
+    number_of_words = 0
+
+    for token in tokens:
+        if (
+            not token.isdigit()
+            and len(token) > 1
+            and master_dictionary.get(token) is not None
+        ):
+            total_tokens += 1
+            word_length += len(token)
+
+            if token not in vocabulary:
+                vocabulary[token] = 1
+
+            total_syllables += int(master_dictionary[token]["Syllables"])
+
+            for key, item in SENTIMENT_OUTPUT_FIELDS.items():
+                if (
+                    master_dictionary[token][key] != "0"
+                    and master_dictionary[token][key] != 0
+                    and master_dictionary[token][key] != None
+                ):
+                    output_data[FIXED_OUTPUT_FIELDS.index(key)] += item
+
+    output_data[4] = total_tokens  # Number_of_Words
+    output_data[8] = total_syllables / total_tokens  # Average_Syllables
+    output_data[9] = word_length / total_tokens  # Average_Word_Length
+    output_data[10] = len(vocabulary)  # Vocabulary
+
+    # Convert values for various columns to %
+    for i in range(original_len_output, len(output_data)):
+        output_data[i] = (output_data[i] / total_tokens) * 100
+
+    print(f"finished {result[0]}")
+    data.append(output_data)
+Write the Results to an Output File
+The last step is to write the results to an output file in your directory.
+
+Run the cell below to write the output file.
+# Open the CSV file in 'w+' mode
+with open("output_file.csv", "w") as file:
+    write = csv.writer(file)
+    write.writerows(data)
+Open the CSV file in 'w+' mode
+with open("output_file.csv", "w") as file: write = csv.writer(file) write.writerows(data)## Congratulations! You should now see a file called output_file.csv in your directory. If so, you have successfully run a lexicon-based sentiment analysis on a set of 10-K filings using the Loughran-McDonald dictionary.
+
+Open the file and scroll to the right to review the sentiment scores. Each row holds the scoring for one 10-K filing. The first Loughran-McDonald sentiment score column is labeled “Negative” and shows a score of approximately 0.66225 for the Twitter 10-K filed on 2014-3-6.
+
+image.png
+
+How are these scores calculated? This Negative score is the number of negative words (as defined by the master dictionary) divided by the total number of words in the document, expressed in percentage points. All the sentiment scores are calculated using the same general method.
+
+Feel free to modify this Notebook for your own research needs!
